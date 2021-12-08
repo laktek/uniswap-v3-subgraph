@@ -6,10 +6,14 @@ import {
   NonfungiblePositionManager,
   Transfer
 } from '../types/NonfungiblePositionManager/NonfungiblePositionManager'
-import { Position, PositionSnapshot, Token } from '../types/schema'
+import { Position, PositionSnapshot, Token, Pool } from '../types/schema'
+import { Pool as PoolABI } from '../types/Factory/Pool'
+import { Pool as PoolTemplate } from '../types/templates'
 import { ADDRESS_ZERO, factoryContract, ZERO_BD, ZERO_BI } from '../utils/constants'
-import { Address, BigInt, ethereum } from '@graphprotocol/graph-ts'
+import { log, Address, BigInt, ethereum } from '@graphprotocol/graph-ts'
 import { convertTokenToDecimal, loadTransaction } from '../utils'
+import { fetchTokenSymbol, fetchTokenName, fetchTokenTotalSupply, fetchTokenDecimals } from '../utils/token'
+import { sqrtPriceX96ToTokenPrices } from '../utils/pricing'
 
 function getPosition(event: ethereum.Event, tokenId: BigInt): Position | null {
   let position = Position.load(tokenId.toString())
@@ -51,6 +55,40 @@ function getPosition(event: ethereum.Event, tokenId: BigInt): Position | null {
   return position
 }
 
+function getToken(address: string): Token | null {
+  // fetch info if null
+  let token = Token.load(address)
+
+  if (token === null) {
+    token = new Token(address)
+    token.symbol = fetchTokenSymbol(Address.fromHexString(address) as Address)
+    token.name = fetchTokenName(Address.fromHexString(address) as Address)
+    token.totalSupply = fetchTokenTotalSupply(Address.fromHexString(address) as Address)
+    let decimals = fetchTokenDecimals(Address.fromHexString(address) as Address)
+
+    // bail if we couldn't figure out the decimals
+    if (decimals === null) {
+      log.debug('mybug the decimal on token 0 was null', [])
+      return null
+    }
+
+    token.decimals = decimals
+    token.derivedETH = ZERO_BD
+    token.volume = ZERO_BD
+    token.volumeUSD = ZERO_BD
+    token.feesUSD = ZERO_BD
+    token.untrackedVolumeUSD = ZERO_BD
+    token.totalValueLocked = ZERO_BD
+    token.totalValueLockedUSD = ZERO_BD
+    token.totalValueLockedUSDUntracked = ZERO_BD
+    token.txCount = ZERO_BI
+    token.poolCount = ZERO_BI
+    token.whitelistPools = []
+  }
+
+  return token
+}
+
 function updateFeeVars(position: Position, event: ethereum.Event, tokenId: BigInt): Position {
   let positionManagerContract = NonfungiblePositionManager.bind(event.address)
   let positionResult = positionManagerContract.try_positions(tokenId)
@@ -81,6 +119,57 @@ function savePositionSnapshot(position: Position, event: ethereum.Event): void {
   positionSnapshot.save()
 }
 
+function createPoolIfNeeded(address: string, token0: Token, token1: Token): void {
+  let pool = Pool.load(address)
+
+  if (pool == null) {
+    pool = new Pool(address) as Pool
+
+    let poolContract = PoolABI.bind(Address.fromHexString(address) as Address)
+
+    pool.feeTier = BigInt.fromI32(poolContract.fee())
+    pool.feeGrowthGlobal0X128 = poolContract.feeGrowthGlobal0X128()
+    pool.feeGrowthGlobal1X128 = poolContract.feeGrowthGlobal1X128()
+    pool.liquidity = poolContract.liquidity() as BigInt
+
+    let slot0 = poolContract.slot0()
+    pool.observationIndex = BigInt.fromI32(slot0.value2)
+
+    let prices = sqrtPriceX96ToTokenPrices(slot0.value0, token0, token1)
+    pool.sqrtPrice = slot0.value0
+    pool.token0Price = prices[0]
+    pool.token1Price = prices[1]
+
+    pool.token0 = token0.id
+    pool.token1 = token1.id
+
+    pool.createdAtTimestamp = ZERO_BI
+    pool.createdAtBlockNumber = ZERO_BI
+    pool.liquidityProviderCount = ZERO_BI
+    pool.txCount = ZERO_BI
+    pool.token0Price = ZERO_BD
+    pool.token1Price = ZERO_BD
+    pool.totalValueLockedToken0 = ZERO_BD
+    pool.totalValueLockedToken1 = ZERO_BD
+    pool.totalValueLockedUSD = ZERO_BD
+    pool.totalValueLockedETH = ZERO_BD
+    pool.totalValueLockedUSDUntracked = ZERO_BD
+    pool.volumeToken0 = ZERO_BD
+    pool.volumeToken1 = ZERO_BD
+    pool.volumeUSD = ZERO_BD
+    pool.feesUSD = ZERO_BD
+    pool.untrackedVolumeUSD = ZERO_BD
+
+    pool.collectedFeesToken0 = ZERO_BD
+    pool.collectedFeesToken1 = ZERO_BD
+    pool.collectedFeesUSD = ZERO_BD
+
+    pool.save()
+    // create the tracked contract based on the template
+    PoolTemplate.create(Address.fromHexString(address) as Address)
+  }
+}
+
 export function handleIncreaseLiquidity(event: IncreaseLiquidity): void {
   let position = getPosition(event, event.params.tokenId)
 
@@ -94,8 +183,14 @@ export function handleIncreaseLiquidity(event: IncreaseLiquidity): void {
     return
   }
 
-  let token0 = Token.load(position.token0)
-  let token1 = Token.load(position.token1)
+  let token0 = getToken(position.token0)
+  let token1 = getToken(position.token1)
+
+  token0.save()
+  token1.save()
+
+  // check if the pool exists and initialize it
+  createPoolIfNeeded(position.pool, token0 as Token, token1 as Token)
 
   let amount0 = convertTokenToDecimal(event.params.amount0, token0.decimals)
   let amount1 = convertTokenToDecimal(event.params.amount1, token1.decimals)
@@ -124,8 +219,15 @@ export function handleDecreaseLiquidity(event: DecreaseLiquidity): void {
     return
   }
 
-  let token0 = Token.load(position.token0)
-  let token1 = Token.load(position.token1)
+  let token0 = getToken(position.token0)
+  let token1 = getToken(position.token1)
+
+  token0.save()
+  token1.save()
+
+  // check if the pool exists and initialize it
+  createPoolIfNeeded(position.pool, token0 as Token, token1 as Token)
+
   let amount0 = convertTokenToDecimal(event.params.amount0, token0.decimals)
   let amount1 = convertTokenToDecimal(event.params.amount1, token1.decimals)
 
@@ -153,8 +255,15 @@ export function handleCollect(event: Collect): void {
     return
   }
 
-  let token0 = Token.load(position.token0)
-  let token1 = Token.load(position.token1)
+  let token0 = getToken(position.token0)
+  let token1 = getToken(position.token1)
+
+  token0.save()
+  token1.save()
+
+  // check if the pool exists and initialize it
+  createPoolIfNeeded(position.pool, token0 as Token, token1 as Token)
+
   let amount0 = convertTokenToDecimal(event.params.amount0, token0.decimals)
   let amount1 = convertTokenToDecimal(event.params.amount1, token1.decimals)
   position.collectedToken0 = position.collectedToken0.plus(amount0)

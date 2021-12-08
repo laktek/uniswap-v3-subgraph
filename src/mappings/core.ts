@@ -21,7 +21,7 @@ import {
   updateTokenHourData,
   updateUniswapDayData
 } from '../utils/intervalUpdates'
-import { createTick, feeTierToTickSpacing } from '../utils/tick'
+import { createTick, createTickInBurn, feeTierToTickSpacing } from '../utils/tick'
 
 export function handleInitialize(event: Initialize): void {
   let pool = Pool.load(event.address.toHexString())
@@ -238,15 +238,26 @@ export function handleBurn(event: BurnEvent): void {
   burn.logIndex = event.logIndex
 
   // tick entities
+  let lowerTickIdx = event.params.tickLower
+  let upperTickIdx = event.params.tickUpper
   let lowerTickId = poolAddress + '#' + BigInt.fromI32(event.params.tickLower).toString()
   let upperTickId = poolAddress + '#' + BigInt.fromI32(event.params.tickUpper).toString()
   let lowerTick = Tick.load(lowerTickId)
   let upperTick = Tick.load(upperTickId)
-  let amount = event.params.amount
-  lowerTick.liquidityGross = lowerTick.liquidityGross.minus(amount)
-  lowerTick.liquidityNet = lowerTick.liquidityNet.minus(amount)
-  upperTick.liquidityGross = upperTick.liquidityGross.minus(amount)
-  upperTick.liquidityNet = upperTick.liquidityNet.plus(amount)
+
+  if (lowerTick === null) {
+    lowerTick = createTickInBurn(lowerTickId, lowerTickIdx, pool.id, event)
+  }
+
+  if (upperTick === null) {
+    upperTick = createTickInBurn(upperTickId, upperTickIdx, pool.id, event)
+  }
+
+  //let amount = event.params.amount
+  // lowerTick.liquidityGross = lowerTick.liquidityGross.minus(amount)
+  // lowerTick.liquidityNet = lowerTick.liquidityNet.minus(amount)
+  // upperTick.liquidityGross = upperTick.liquidityGross.minus(amount)
+  // upperTick.liquidityNet = upperTick.liquidityNet.plus(amount)
 
   updateUniswapDayData(event)
   updatePoolDayData(event)
